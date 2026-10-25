@@ -22,6 +22,16 @@ const nextConfig: NextConfig = {
       },
     },
   },
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${
+          process.env.API_ORIGIN ?? "https://realestate-crm-qtiq.onrender.com"
+        }/api/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;
