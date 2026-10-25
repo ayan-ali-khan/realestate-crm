@@ -1,0 +1,260 @@
+// Real Estate CRM — normalized schema (Phase 1).
+// Design notes: docs/DECISIONS.md (ADR-004..006).
+// - Lead doubles as Customer (convertedToCustomer flag): one identity record,
+//   pipeline history and activities stay attached after conversion.
+// - Leads are soft-deleted (deletedAt) so activities/tasks keep referential integrity.
+// - aiScore/aiScoreReason are populated ONLY by the real AI service (Phase 10);
+//   the seed leaves them null on purpose (no fake data).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Prisma 7: connection URLs for CLI commands live in prisma.config.ts;
+  // the runtime client uses the @prisma/adapter-pg driver adapter.
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  AGENT
+}
+
+enum PipelineStage {
+  NEW_LEAD
+  CONTACTED
+  SITE_VISIT
+  NEGOTIATION
+  CLOSED_WON
+  CLOSED_LOST
+}
+
+enum LeadSource {
+  WEBSITE
+  REFERRAL
+  ZILLOW
+  WALK_IN
+  COLD_CALL
+  SOCIAL_MEDIA
+  OTHER
+}
+
+enum LeadPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum PropertyType {
+  APARTMENT
+  HOUSE
+  VILLA
+  TOWNHOUSE
+  LAND
+  COMMERCIAL
+}
+
+enum PropertyStatus {
+  AVAILABLE
+  RESERVED
+  SOLD
+}
+
+enum ActivityType {
+  CALL
+  EMAIL
+  NOTE
+  STAGE_CHANGE
+  SITE_VISIT
+  AI_ACTION
+}
+
+enum TaskStatus {
+  PENDING
+  DONE
+  CANCELLED
+}
+
+enum TaskCreatedBy {
+  USER
+  AI
+}
+
+enum SiteVisitStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  passwordHash  String
+  role          Role     @default(AGENT)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  assignedLeads  Lead[]          @relation("LeadAssignedTo")
+  activities     Activity[]
+  assignedTasks  Task[]          @relation("TaskAssignee")
+  refreshTokens  RefreshToken[]
+
+  @@index([role])
+}
+
+model Lead {
+  id                   String         @id @default(cuid())
+  name                 String
+  // Optional: walk-in leads sometimes only leave a phone number.
+  email                String?
+  phone                String?
+  source               LeadSource
+  budgetMin            Int?
+  budgetMax            Int?
+  preferredLocation    String?
+  stage                PipelineStage  @default(NEW_LEAD)
+  priority             LeadPriority   @default(MEDIUM)
+  // 0-100 with a short human-readable reason; set by the AI service only.
+  aiScore              Int?
+  aiScoreReason        String?
+  assignedToId         String?
+  assignedTo           User?          @relation("LeadAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  convertedToCustomer  Boolean        @default(false)
+  convertedAt          DateTime?
+  deletedAt            DateTime?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  activities  Activity[]
+  tasks       Task[]
+  inquiries   LeadProperty[]
+  siteVisits  SiteVisit[]
+
+  // List/filter/search paths from the spec (stage, source, priority, assignee, date range).
+  @@index([stage])
+  @@index([source])
+  @@index([priority])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@index([name])
+}
+
+model Property {
+  id          String         @id @default(cuid())
+  title       String
+  description String
+  // Whole currency units (USD); no floats, cents precision not needed for real estate.
+  price       Int
+  location    String
+  city        String
+  type        PropertyType
+  bedrooms    Int            @default(0)
+  bathrooms   Int            @default(0)
+  areaSqft    Int
+  amenities   String[]
+  images      String[]
+  status      PropertyStatus @default(AVAILABLE)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  inquiries  LeadProperty[]
+  siteVisits SiteVisit[]
+
+  @@index([city])
+  @@index([status])
+  @@index([price])
+  @@index([type])
+}
+
+// Interest link between a lead and a property (m:n) with an interest note.
+model LeadProperty {
+  leadId     String
+  propertyId String
+  note       String?
+  lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([leadId, propertyId])
+  @@index([propertyId])
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  leadId    String
+  // null for AI actions or when the acting user is removed.
+  userId    String?
+  type      ActivityType
+  content   String
+  metadata  Json?
+  lead      Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user      User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt DateTime     @default(now())
+
+  @@index([leadId, createdAt])
+  @@index([userId])
+}
+
+model Task {
+  id         String         @id @default(cuid())
+  leadId     String
+  assigneeId String
+  title      String
+  dueAt      DateTime
+  status     TaskStatus     @default(PENDING)
+  // Maintained by writes (create/update) and the Phase 4 node-cron sweep
+  // (src/jobs/overdue.sync.ts); a DONE task keeps its overdue history instead
+  // of being reshuffled into an OVERDUE status.
+  isOverdue  Boolean        @default(false)
+  createdBy  TaskCreatedBy  @default(USER)
+  lead       Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignee   User           @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@index([assigneeId, status])
+  @@index([leadId])
+  @@index([dueAt])
+  @@index([isOverdue])
+}
+
+// Server-side store for refresh-token rotation: tokens are stored as SHA-256
+// hashes (never raw), and refresh rotates (old token is revoked on use), so a
+// stolen-and-replayed token is detected and the whole chain can be revoked.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  // Phase 4 token-prune job deletes WHERE expiresAt < now; index keeps the
+  // nightly sweep a range scan instead of a table scan.
+  @@index([expiresAt])
+}
+
+model SiteVisit {
+  id          String          @id @default(cuid())
+  leadId      String
+  propertyId  String
+  scheduledAt DateTime
+  status      SiteVisitStatus @default(SCHEDULED)
+  lead        Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  property    Property        @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([scheduledAt])
+  @@index([leadId])
+  @@index([propertyId])
+}

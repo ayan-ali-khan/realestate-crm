@@ -1,0 +1,29 @@
+# dependencies / builds
+node_modules/
+dist/
+.next/
+out/
+coverage/
+
+# generated Prisma client (regenerate with `bun run --filter @crm/api db:generate`)
+apps/api/src/generated/
+
+# env files (only .env.example is committed)
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+
+# tooling / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.freebuff/
+
+# Salesforce CLI artifacts dropped in this folder by other tooling
+.sf/
+orgs/
